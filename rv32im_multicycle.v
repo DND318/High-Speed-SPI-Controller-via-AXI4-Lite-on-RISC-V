@@ -225,7 +225,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: alu_riscv (từ repo Hari545543)
+// MODULE: alu_riscv
 // =====================================================================
 module alu_riscv (
     input  wire [31:0] operand_1, operand_2,
@@ -256,7 +256,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: imm_gen (từ repo Hari545543)
+// MODULE: imm_gen 
 // =====================================================================
 module imm_gen (
     input  wire [24:0] instr,
@@ -282,7 +282,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: branch_unit (từ repo Hari545543, sửa latch bug)
+// MODULE: branch_unit 
 // =====================================================================
 module branch_unit (
     input  wire [2:0]  funct3_in,
@@ -308,7 +308,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: load_unit (từ repo Hari545543, khôi phục byte_offset)
+// MODULE: load_unit
 // =====================================================================
 module load_unit (
     input  wire [31:0] data_in,
@@ -336,7 +336,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: store_unit (từ repo Hari545543, thêm byte_offset alignment)
+// MODULE: store_unit 
 // =====================================================================
 module store_unit (
     input  wire [31:0] rs2_in,
@@ -363,7 +363,7 @@ endmodule
 
 
 // =====================================================================
-// MODULE: Datapath_Multi_cycle_Processor_RISC_V (RV32IMZicsr)
+// MODULE: Datapath_Multi_cycle_Processor_RISC_V 
 // =====================================================================
 module Datapath_Multi_cycle_Processor_RISC_V (
     input  wire        clk, reset,
@@ -510,12 +510,12 @@ module Datapath_Multi_cycle_Processor_RISC_V (
    // ── RV32M Divider registers ──────────────────────────────────────
     reg [31:0] div_quot, div_rem;
     reg [5:0]  div_cnt;
-    reg [62:0] div_dvd;
+    reg [63:0] div_acc;        // [63:32]=partial remainder, [31:0]=dividend/quotient
     reg [31:0] div_dvsr;
     reg        div_sign_q, div_sign_r;
 
-    // Đường dây phụ giải quyết phép trừ bộ chia (Thêm dòng này)
-    wire [31:0] div_sub = div_dvd[62:31] - div_dvsr;
+    // shifted partial-remainder minus divisor
+    wire [31:0] div_sub = div_acc[62:31] - div_dvsr;
 
     // ── WB Mux ──────────────────────────────────────────────────────
     wire [31:0] mext_res = funct3[2] ? (funct3[1] ? div_rem : div_quot) : mul_result;
@@ -546,7 +546,7 @@ module Datapath_Multi_cycle_Processor_RISC_V (
             A<=0; B<=0; ALUOut<=0; MDR<=0; PCPlus4_reg<=0;
             mcause_r<=0; mepc_r<=0; trap_r<=0;
             div_quot<=0; div_rem<=0; div_cnt<=0;
-            div_dvd<=0; div_dvsr<=0; div_sign_q<=0; div_sign_r<=0;
+            div_acc<=0; div_dvsr<=0; div_sign_q<=0; div_sign_r<=0;
             csr_mstatus<=32'h0000_1800; csr_mtvec<=0; csr_mscratch<=0;
             csr_mepc<=0; csr_mcause<=0; csr_mtval<=0; csr_mie<=0;
         end else begin
@@ -558,7 +558,7 @@ module Datapath_Multi_cycle_Processor_RISC_V (
                 `S_ID: begin
                     A<=rf_rdata1; B<=rf_rdata2;
                     if (is_trap) begin
-                        mcause_r<=trap_cause; mepc_r<=PC-32'd4;
+                        mcause_r<=trap_cause; mepc_r<=PC;
                         trap_r<=1; PC<=PCPlus4_reg; state<=`S_IF;
                     end else state<=`S_EX;
                 end
@@ -581,11 +581,11 @@ module Datapath_Multi_cycle_Processor_RISC_V (
                                     if (!funct3[0]) begin // signed
                                         div_sign_q <= A[31]^B[31];
                                         div_sign_r <= A[31];
-                                        div_dvd  <= {31'd0,(A[31]?-A:A)};
+                                        div_acc  <= {32'd0,(A[31]?-A:A)};
                                         div_dvsr <=        (B[31]?-B:B);
                                     end else begin // unsigned
                                         div_sign_q <= 0; div_sign_r <= 0;
-                                        div_dvd <= {31'd0, A}; div_dvsr <= B;
+                                        div_acc <= {32'd0, A}; div_dvsr <= B;
                                     end
                                     div_quot<=0; div_cnt<=6'd32; state<=`S_DIV;
                                 end
@@ -596,18 +596,15 @@ module Datapath_Multi_cycle_Processor_RISC_V (
                 end
                 `S_DIV: begin
                     if (div_cnt > 0) begin
-                        if (div_dvd[62:31] >= div_dvsr) begin
-                            // Sử dụng div_sub[30:0] hoàn toàn hợp lệ về mặt cú pháp
-                            div_dvd  <= { div_sub[30:0], div_dvd[30:0], 1'b0 };
-                            div_quot <= { div_quot[30:0], 1'b1 };
-                        end else begin
-                            div_dvd  <= { div_dvd[61:0], 1'b0 };
-                            div_quot <= { div_quot[30:0], 1'b0 };
-                        end
+                        // shift the 64-bit accumulator left by 1; quotient bit lands in acc[0]
+                        if (div_acc[62:31] >= div_dvsr)
+                            div_acc <= { div_sub, div_acc[30:0], 1'b1 };
+                        else
+                            div_acc <= { div_acc[62:0], 1'b0 };
                         div_cnt <= div_cnt - 1;
                     end else begin
-                        div_rem  <= div_sign_r ? -div_dvd[62:31] : div_dvd[62:31];
-                        div_quot <= div_sign_q ? -div_quot       : div_quot;
+                        div_rem  <= div_sign_r ? -div_acc[63:32] : div_acc[63:32];
+                        div_quot <= div_sign_q ? -div_acc[31:0]  : div_acc[31:0];
                         state    <= `S_WB;
                     end
                 end
